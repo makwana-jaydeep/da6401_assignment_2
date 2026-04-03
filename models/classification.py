@@ -21,6 +21,11 @@ class VGG11Classifier(nn.Module):
             CustomDropout(p=dropout_p),
             nn.Linear(4096, num_classes),
         )
+        # Initialize classifier head weights
+        for m in self.classifier.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.encoder(x, return_features=False)
