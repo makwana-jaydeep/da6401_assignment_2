@@ -28,13 +28,6 @@ class OxfordIIITPetDataset(Dataset):
     """
 
     def __init__(self, root: str, split: str = "trainval", transform=None, mask_transform=None):
-        """
-        Args:
-            root: Path to dataset root (contains 'images/', 'annotations/').
-            split: 'trainval' or 'test'.
-            transform: Albumentations transform applied to image + bbox + mask together.
-            mask_transform: Additional mask-only transforms (rarely needed).
-        """
         self.root = root
         self.split = split
         self.transform = transform
@@ -44,12 +37,13 @@ class OxfordIIITPetDataset(Dataset):
         self.xml_dir = os.path.join(root, "annotations", "xmls")
         self.mask_dir = os.path.join(root, "annotations", "trimaps")
 
-        split_file = os.path.join(root, "annotations", f"{split}.txt")
-        self.samples = self._parse_split(split_file)
+        self.samples = self._parse_split()
 
-    def _parse_split(self, split_file):
-        samples = []
-        with open(split_file) as f:
+    def _parse_split(self):
+        # Use list.txt which has labels for all images
+        list_file = os.path.join(self.root, "annotations", "list.txt")
+        all_samples = []
+        with open(list_file) as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#"):
@@ -58,10 +52,22 @@ class OxfordIIITPetDataset(Dataset):
                 name = parts[0]
                 class_id = int(parts[1]) - 1
                 img_path = os.path.join(self.image_dir, f"{name}.jpg")
-                if not os.path.exists(img_path):
+                mask_path = os.path.join(self.mask_dir, f"{name}.png")
+                if not os.path.exists(img_path) or not os.path.exists(mask_path):
                     continue
-                samples.append((name, class_id))
-        return samples
+                all_samples.append((name, class_id))
+
+        # Do an 85/15 split manually and consistently
+        import random
+        rng = random.Random(42)
+        all_samples_sorted = sorted(all_samples)
+        rng.shuffle(all_samples_sorted)
+        split_idx = int(0.85 * len(all_samples_sorted))
+
+        if self.split == "trainval":
+            return all_samples_sorted[:split_idx]
+        else:
+            return all_samples_sorted[split_idx:]
 
     def _load_bbox(self, name):
         xml_path = os.path.join(self.xml_dir, f"{name}.xml")
