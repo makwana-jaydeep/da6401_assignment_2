@@ -178,7 +178,8 @@ def train_localizer(args):
             for images, _, bboxes, _ in val_loader:
                 images, bboxes = images.to(device), bboxes.to(device)
                 preds = model(images)
-                loss = mse_loss(preds, bboxes) + iou_loss(preds, bboxes)
+                LAMBDA_MSE = 0.01  # scale down MSE to match IoU's [0,1] range
+                loss = LAMBDA_MSE * mse_loss(preds, bboxes) + iou_loss(preds, bboxes)
                 val_loss += loss.item() * images.size(0)
                 val_iou += (1 - iou_loss(preds, bboxes).item()) * images.size(0)
                 val_total += images.size(0)
