@@ -56,7 +56,10 @@ class OxfordIIITPetDataset(Dataset):
                     continue
                 parts = line.split()
                 name = parts[0]
-                class_id = int(parts[1]) - 1  # 0-indexed
+                class_id = int(parts[1]) - 1
+                img_path = os.path.join(self.image_dir, f"{name}.jpg")
+                if not os.path.exists(img_path):
+                    continue
                 samples.append((name, class_id))
         return samples
 
