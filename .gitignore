@@ -1,0 +1,11 @@
+# Ignore dataset folder
+dataset/
+
+# Ignore virtual environments
+venv/
+.venv/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
