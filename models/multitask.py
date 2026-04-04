@@ -9,6 +9,10 @@ from .classification import VGG11Classifier
 from .localization import VGG11Localizer
 from .segmentation import VGG11UNet
 
+import gdown
+gdown.download(id="1fPd3gsn7CB-LoX621QLUoj6j1YQQksL7", output=classifier_path, quiet=False)
+gdown.download(id="12iBT78Ptvb__K-h1jlPJc0MenLHU-XOJ", output=localizer_path, quiet=False)
+gdown.download(id="1mSZbQLzeLpHtoAcPpQs_Ka1RM486NiiH", output=unet_path, quiet=False)
 
 def double_conv(in_c, out_c):
     return nn.Sequential(
