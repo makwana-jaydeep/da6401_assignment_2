@@ -26,7 +26,7 @@ def get_transforms(train=True):
     if train:
         return A.Compose(
             [
-                A.Resize(IMAGE_SIZE, IMAGE_SIZE),
+                A.Resize(height=IMAGE_SIZE, width=IMAGE_SIZE),
                 A.HorizontalFlip(p=0.5),
                 A.ColorJitter(p=0.3),
                 A.Normalize(mean=MEAN, std=STD),
@@ -36,7 +36,7 @@ def get_transforms(train=True):
         )
     return A.Compose(
         [
-            A.Resize(IMAGE_SIZE, IMAGE_SIZE),
+            A.Resize(height=IMAGE_SIZE, width=IMAGE_SIZE),
             A.Normalize(mean=MEAN, std=STD),
             ToTensorV2(),
         ],
