@@ -126,35 +126,12 @@ class MultiTaskPerceptionModel(nn.Module):
         localizer_path: str,
         unet_path: str,
     ) -> None:
-        """
-        Transfer weights from individually trained checkpoints into the
-        unified model. Missing checkpoint files are skipped with a warning so
-        the model can still be constructed for inference on partial pipelines.
-        """
         device = torch.device("cpu")
-
-        if os.path.exists(classifier_path):
-            clf = VGG11Classifier()
-            clf.load_state_dict(torch.load(classifier_path, map_location=device))
-            self.backbone.load_state_dict(clf.encoder.state_dict())
-            self.cls_head.load_state_dict(clf.classifier.state_dict())
-            print(f"[MultiTask] Loaded classifier weights from {classifier_path}")
-        else:
-            print(f"[MultiTask] WARNING: classifier checkpoint not found at {classifier_path}. "
-                  "Backbone and cls_head remain randomly initialised.")
-
-        if os.path.exists(localizer_path):
-            loc = VGG11Localizer()
-            loc.load_state_dict(torch.load(localizer_path, map_location=device))
-            self.loc_head.load_state_dict(loc.regressor.state_dict())
-            print(f"[MultiTask] Loaded localizer weights from {localizer_path}")
-        else:
-            print(f"[MultiTask] WARNING: localizer checkpoint not found at {localizer_path}. "
-                  "loc_head remains randomly initialised.")
 
         if os.path.exists(unet_path):
             unet = VGG11UNet()
             unet.load_state_dict(torch.load(unet_path, map_location=device))
+            self.backbone.load_state_dict(unet.encoder.state_dict())  # backbone from unet
             self.bottleneck.load_state_dict(unet.bottleneck.state_dict())
             self.up5.load_state_dict(unet.up5.state_dict())
             self.dec5.load_state_dict(unet.dec5.state_dict())
@@ -167,10 +144,25 @@ class MultiTaskPerceptionModel(nn.Module):
             self.up1.load_state_dict(unet.up1.state_dict())
             self.dec1.load_state_dict(unet.dec1.state_dict())
             self.seg_head.load_state_dict(unet.head.state_dict())
-            print(f"[MultiTask] Loaded U-Net weights from {unet_path}")
+            print(f"[MultiTask] Loaded U-Net weights (+ backbone) from {unet_path}")
         else:
-            print(f"[MultiTask] WARNING: U-Net checkpoint not found at {unet_path}. "
-                  "Segmentation decoder remains randomly initialised.")
+            print(f"[MultiTask] WARNING: U-Net checkpoint not found at {unet_path}.")
+
+        if os.path.exists(classifier_path):
+            clf = VGG11Classifier()
+            clf.load_state_dict(torch.load(classifier_path, map_location=device))
+            self.cls_head.load_state_dict(clf.classifier.state_dict())  # cls_head only, not backbone
+            print(f"[MultiTask] Loaded classifier head from {classifier_path}")
+        else:
+            print(f"[MultiTask] WARNING: classifier checkpoint not found at {classifier_path}.")
+
+        if os.path.exists(localizer_path):
+            loc = VGG11Localizer()
+            loc.load_state_dict(torch.load(localizer_path, map_location=device))
+            self.loc_head.load_state_dict(loc.regressor.state_dict())
+            print(f"[MultiTask] Loaded localizer weights from {localizer_path}")
+        else:
+            print(f"[MultiTask] WARNING: localizer checkpoint not found at {localizer_path}.")
 
     # ── Forward ────────────────────────────────────────────────────────────
 
