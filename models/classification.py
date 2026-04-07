@@ -8,7 +8,7 @@ from .layers import CustomDropout
 class VGG11Classifier(nn.Module):
     """VGG11 encoder + fully connected classification head (37 breeds)."""
 
-    def __init__(self, num_classes: int = 37, in_channels: int = 3, dropout_p: float = 0.5):
+    def __init__(self, num_classes: int = 37, in_channels: int = 3, dropout_p: float = 0.3):
         super().__init__()
         self.encoder = VGG11Encoder(in_channels=in_channels)
         self.adaptive_pool = nn.AdaptiveAvgPool2d((7, 7))
