@@ -64,8 +64,9 @@ class MultiTaskPerceptionModel(nn.Module):
         gdown.download(id="1mSZbQLzeLpHtoAcPpQs_Ka1RM486NiiH", output=unet_path, quiet=False)
 
         # ── Shared backbone ───────────────────────────────────────────────
-        self.backbone = VGG11Encoder(in_channels=in_channels)
-
+        # self.backbone = VGG11Encoder(in_channels=in_channels)
+        self.backbone = VGG11Encoder(in_channels=in_channels)      # for cls + loc
+        self.seg_backbone = VGG11Encoder(in_channels=in_channels)  # for segmentation
         # ── Classification head ───────────────────────────────────────────
         self.adaptive_pool = nn.AdaptiveAvgPool2d((7, 7))
         self.cls_head = nn.Sequential(
@@ -120,18 +121,13 @@ class MultiTaskPerceptionModel(nn.Module):
 
     # ── Weight transfer ────────────────────────────────────────────────────
 
-    def _load_weights(
-        self,
-        classifier_path: str,
-        localizer_path: str,
-        unet_path: str,
-    ) -> None:
+    def _load_weights(self, classifier_path, localizer_path, unet_path):
         device = torch.device("cpu")
 
         if os.path.exists(unet_path):
             unet = VGG11UNet()
             unet.load_state_dict(torch.load(unet_path, map_location=device))
-            self.backbone.load_state_dict(unet.encoder.state_dict())  # backbone from unet
+            self.seg_backbone.load_state_dict(unet.encoder.state_dict())  # seg_backbone from unet
             self.bottleneck.load_state_dict(unet.bottleneck.state_dict())
             self.up5.load_state_dict(unet.up5.state_dict())
             self.dec5.load_state_dict(unet.dec5.state_dict())
@@ -144,15 +140,16 @@ class MultiTaskPerceptionModel(nn.Module):
             self.up1.load_state_dict(unet.up1.state_dict())
             self.dec1.load_state_dict(unet.dec1.state_dict())
             self.seg_head.load_state_dict(unet.head.state_dict())
-            print(f"[MultiTask] Loaded U-Net weights (+ backbone) from {unet_path}")
+            print(f"[MultiTask] Loaded U-Net weights (+ seg_backbone) from {unet_path}")
         else:
             print(f"[MultiTask] WARNING: U-Net checkpoint not found at {unet_path}.")
 
         if os.path.exists(classifier_path):
             clf = VGG11Classifier()
             clf.load_state_dict(torch.load(classifier_path, map_location=device))
-            self.cls_head.load_state_dict(clf.classifier.state_dict())  # cls_head only, not backbone
-            print(f"[MultiTask] Loaded classifier head from {classifier_path}")
+            self.backbone.load_state_dict(clf.encoder.state_dict())  # cls backbone from classifier
+            self.cls_head.load_state_dict(clf.classifier.state_dict())
+            print(f"[MultiTask] Loaded classifier weights from {classifier_path}")
         else:
             print(f"[MultiTask] WARNING: classifier checkpoint not found at {classifier_path}.")
 
@@ -164,56 +161,23 @@ class MultiTaskPerceptionModel(nn.Module):
         else:
             print(f"[MultiTask] WARNING: localizer checkpoint not found at {localizer_path}.")
 
-    # ── Forward ────────────────────────────────────────────────────────────
-
     def forward(self, x: torch.Tensor) -> dict:
-        """
-        Single forward pass over the shared backbone, branching into three heads.
+        # cls + loc — use classifier backbone
+        bottleneck, _ = self.backbone(x, return_features=True)
+        pooled = self.adaptive_pool(bottleneck)
+        flat = torch.flatten(pooled, 1)
+        cls_out = self.cls_head(flat)
+        loc_out = self.loc_head(flat)
 
-        Returns
-        -------
-        dict with keys:
-            "classification"  — (B, 37) logits
-            "localization"    — (B, 4)  bbox coords [cx, cy, w, h] in (0, 224)
-            "segmentation"    — (B, 3, H, W) per-pixel class logits
-        """
-        # Shared encoder — produces bottleneck + all five skip-connection maps
-        bottleneck, features = self.backbone(x, return_features=True)
-
-        # ── Classification + Localisation (share the same pooled feature) ──
-        pooled = self.adaptive_pool(bottleneck)   # (B, 512, 7, 7)
-        flat   = torch.flatten(pooled, 1)          # (B, 25088)
-        cls_out = self.cls_head(flat)              # (B, 37)
-        loc_out = self.loc_head(flat)              # (B, 4) ∈ (0, 224)
-
-        # ── Segmentation decoder ───────────────────────────────────────────
-        s = self.bottleneck(bottleneck)            # (B, 1024, 7,   7)
-
-        s = self.up5(s)                            # (B,  512, 14,  14)
-        s = torch.cat([s, features["f5"]], dim=1)  # (B, 1024, 14,  14)
-        s = self.dec5(s)                           # (B,  512, 14,  14)
-
-        s = self.up4(s)                            # (B,  256, 28,  28)
-        s = torch.cat([s, features["f4"]], dim=1)  # (B,  768, 28,  28)
-        s = self.dec4(s)                           # (B,  256, 28,  28)
-
-        s = self.up3(s)                            # (B,  128, 56,  56)
-        s = torch.cat([s, features["f3"]], dim=1)  # (B,  384, 56,  56)
-        s = self.dec3(s)                           # (B,  128, 56,  56)
-
-        s = self.up2(s)                            # (B,   64, 112, 112)
-        s = torch.cat([s, features["f2"]], dim=1)  # (B,  192, 112, 112)
-        s = self.dec2(s)                           # (B,   64, 112, 112)
-
-        s = self.up1(s)                            # (B,   32, 224, 224)
-        s = torch.cat([s, features["f1"]], dim=1)  # (B,   96, 224, 224)
-        s = self.dec1(s)                           # (B,   32, 224, 224)
-
+        # seg — use unet backbone
+        seg_bottleneck, features = self.seg_backbone(x, return_features=True)
+        s = self.bottleneck(seg_bottleneck)
+        s = self.up5(s);  s = torch.cat([s, features["f5"]], dim=1); s = self.dec5(s)
+        s = self.up4(s);  s = torch.cat([s, features["f4"]], dim=1); s = self.dec4(s)
+        s = self.up3(s);  s = torch.cat([s, features["f3"]], dim=1); s = self.dec3(s)
+        s = self.up2(s);  s = torch.cat([s, features["f2"]], dim=1); s = self.dec2(s)
+        s = self.up1(s);  s = torch.cat([s, features["f1"]], dim=1); s = self.dec1(s)
         s = self.seg_dropout(s)
-        seg_out = self.seg_head(s)                 # (B,    3, 224, 224)
+        seg_out = self.seg_head(s)
 
-        return {
-            "classification": cls_out,
-            "localization":   loc_out,
-            "segmentation":   seg_out,
-        }
+        return {"classification": cls_out, "localization": loc_out, "segmentation": seg_out}
