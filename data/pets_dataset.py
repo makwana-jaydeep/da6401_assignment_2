@@ -1,11 +1,9 @@
 import os
 import xml.etree.ElementTree as ET
-
 import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
-
 
 CLASS_NAMES = [
     "Abyssinian", "Bengal", "Birman", "Bombay", "British_Shorthair",
@@ -20,27 +18,19 @@ CLASS_NAMES = [
 ]
 CLASS_TO_IDX = {name: idx for idx, name in enumerate(CLASS_NAMES)}
 
-
 class OxfordIIITPetDataset(Dataset):
-    """
-    Oxford-IIIT Pet dataset for multi-task learning.
-    Returns image, class label, bounding box [cx, cy, w, h] in pixel space, segmentation mask.
-    """
-
-    def __init__(self, root: str, split: str = "trainval", transform=None, mask_transform=None):
+    def __init__(self, root: str, split: str = "trainval", transform=None, mask_transform=None, require_bbox=False):
         self.root = root
         self.split = split
         self.transform = transform
         self.mask_transform = mask_transform
-
+        self.require_bbox = require_bbox
         self.image_dir = os.path.join(root, "images")
         self.xml_dir = os.path.join(root, "annotations", "xmls")
         self.mask_dir = os.path.join(root, "annotations", "trimaps")
-
         self.samples = self._parse_split()
 
     def _parse_split(self):
-        # Use list.txt which has labels for all images
         list_file = os.path.join(self.root, "annotations", "list.txt")
         all_samples = []
         with open(list_file) as f:
@@ -53,18 +43,24 @@ class OxfordIIITPetDataset(Dataset):
                 class_id = int(parts[1]) - 1
                 img_path = os.path.join(self.image_dir, f"{name}.jpg")
                 mask_path = os.path.join(self.mask_dir, f"{name}.png")
+                xml_path = os.path.join(self.xml_dir, f"{name}.xml")
+                
                 if not os.path.exists(img_path) or not os.path.exists(mask_path):
                     continue
+                    
+                # Skip samples without bounding boxes if require_bbox is True
+                if self.require_bbox and not os.path.exists(xml_path):
+                    continue
+                    
                 all_samples.append((name, class_id))
 
-        # Do an 85/15 split manually and consistently
         import random
         rng = random.Random(42)
         all_samples_sorted = sorted(all_samples)
         rng.shuffle(all_samples_sorted)
         split_idx = int(0.85 * len(all_samples_sorted))
 
-        if self.split == "trainval":
+        if self.split in ["trainval"]:
             return all_samples_sorted[:split_idx]
         else:
             return all_samples_sorted[split_idx:]
@@ -95,13 +91,10 @@ class OxfordIIITPetDataset(Dataset):
 
     def __getitem__(self, idx):
         name, class_id = self.samples[idx]
-
         img_path = os.path.join(self.image_dir, f"{name}.jpg")
         image = np.array(Image.open(img_path).convert("RGB"))
-
         mask_path = os.path.join(self.mask_dir, f"{name}.png")
         mask = np.array(Image.open(mask_path))
-        # Trimap: 1=foreground, 2=background, 3=border -> 0-indexed
         mask = (mask - 1).clip(0, 2).astype(np.uint8)
 
         bbox_data = self._load_bbox(name)
@@ -110,26 +103,17 @@ class OxfordIIITPetDataset(Dataset):
         else:
             h, w = image.shape[:2]
             bbox = [w / 2.0, h / 2.0, float(w), float(h)]
-            orig_w, orig_h = w, h
 
         if self.transform is not None:
             h, w = image.shape[:2]
-            # Convert cx,cy,w,h -> x_min,y_min,w,h for albumentations
-            bx = bbox[0] - bbox[2] / 2
-            by = bbox[1] - bbox[3] / 2
-            bw = bbox[2]
-            bh = bbox[3]
-            # Clip to valid range
-            bx = max(0.0, min(bx, w - 1))
-            by = max(0.0, min(by, h - 1))
-            bw = min(bw, w - bx)
-            bh = min(bh, h - by)
+            bx = max(0.0, bbox[0] - bbox[2] / 2)
+            by = max(0.0, bbox[1] - bbox[3] / 2)
+            bw = min(bbox[2], w - bx)
+            bh = min(bbox[3], h - by)
 
             transformed = self.transform(
-                image=image,
-                mask=mask,
-                bboxes=[[bx, by, bw, bh]],
-                bbox_labels=[0],
+                image=image, mask=mask,
+                bboxes=[[bx, by, bw, bh]], bbox_labels=[0],
             )
             image = transformed["image"]
             mask = transformed["mask"]
@@ -137,12 +121,12 @@ class OxfordIIITPetDataset(Dataset):
             if len(boxes) > 0:
                 bx2, by2, bw2, bh2 = boxes[0]
                 bbox = [bx2 + bw2 / 2, by2 + bh2 / 2, bw2, bh2]
-            # else keep original (rare edge case)
+            else:
+                bbox = [112.0, 112.0, 224.0, 224.0]
         else:
             image = torch.from_numpy(image.transpose(2, 0, 1)).float() / 255.0
             mask = torch.from_numpy(mask).long()
 
         bbox_tensor = torch.tensor(bbox, dtype=torch.float32)
         label_tensor = torch.tensor(class_id, dtype=torch.long)
-
         return image, label_tensor, bbox_tensor, mask
