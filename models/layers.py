@@ -3,35 +3,34 @@ import torch.nn as nn
 
 
 class CustomDropout(nn.Module):
-    """Inverted dropout implemented without torch.nn.Dropout."""
+    """Manual inverted dropout — does NOT use nn.Dropout internally."""
 
     def __init__(self, p: float = 0.5):
         super().__init__()
-        if not 0.0 <= p < 1.0:
-            raise ValueError(f"Dropout probability must be in [0, 1), got {p}")
+        if not (0.0 <= p < 1.0):
+            raise ValueError(f"Drop probability must be in [0, 1), received {p}")
         self.p = p
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if not self.training or self.p == 0.0:
+        if self.p == 0.0 or not self.training:
             return x
-        mask = torch.empty_like(x).bernoulli_(1.0 - self.p)
-        return x * mask / (1.0 - self.p)
+        keep_prob = 1.0 - self.p
+        bernoulli_mask = torch.empty_like(x).bernoulli_(keep_prob)
+        return x * bernoulli_mask / keep_prob
 
 
 class SigmoidBBox(nn.Module):
     """
-    Final activation for bounding box regression heads.
+    Output activation for bounding-box regression.
 
-    Replaces the naive ReLU that was previously used. ReLU causes two problems:
-      1. Dead neurons: once a unit outputs 0, the gradient is also 0 and the
-         weight never updates ('dying ReLU' problem).
-      2. Unbounded output: ReLU allows arbitrarily large predictions, making
-         MSE loss explode early in training when weights are random.
-
-    Sigmoid maps logits to (0, 1) and multiplying by `scale` (= image size in
-    pixels, default 224) maps predictions to (0, 224). This matches the dataset's
-    [cx, cy, w, h] coordinate space exactly, keeps gradients alive everywhere,
-    and bounds the output so MSE stays numerically stable from epoch 1.
+    Why sigmoid instead of ReLU:
+      - ReLU zeroes out negative activations and kills gradients for those
+        neurons permanently (the 'dying ReLU' issue).
+      - Unclamped ReLU lets predictions grow without bound, causing MSE loss
+        to blow up in early epochs when weights are still random.
+      Sigmoid squashes logits to (0, 1); scaling by `scale` (image width/height)
+      brings predictions into the [0, scale] pixel range, which aligns with
+      the [cx, cy, w, h] target format used by the dataset loader.
     """
 
     def __init__(self, scale: float = 224.0):

@@ -6,7 +6,7 @@ from .layers import CustomDropout
 
 
 class VGG11Classifier(nn.Module):
-    """VGG11 encoder + fully connected classification head (37 breeds)."""
+    """VGG-11 encoder paired with a 3-layer FC head for 37-breed classification."""
 
     def __init__(self, num_classes: int = 37, in_channels: int = 3, dropout_p: float = 0.3):
         super().__init__()
@@ -21,14 +21,16 @@ class VGG11Classifier(nn.Module):
             CustomDropout(p=dropout_p),
             nn.Linear(4096, num_classes),
         )
-        # Initialize classifier head weights
-        for m in self.classifier.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                nn.init.constant_(m.bias, 0)
+        self._init_head()
+
+    def _init_head(self):
+        for layer in self.classifier.modules():
+            if isinstance(layer, nn.Linear):
+                nn.init.normal_(layer.weight, mean=0.0, std=0.01)
+                nn.init.constant_(layer.bias, 0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.encoder(x, return_features=False)
-        x = self.adaptive_pool(x)
-        x = torch.flatten(x, 1)
-        return self.classifier(x)
+        feat = self.encoder(x, return_features=False)
+        feat = self.adaptive_pool(feat)
+        feat = torch.flatten(feat, start_dim=1)
+        return self.classifier(feat)

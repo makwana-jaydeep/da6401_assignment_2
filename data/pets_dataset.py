@@ -1,5 +1,7 @@
 import os
+import random
 import xml.etree.ElementTree as ET
+
 import numpy as np
 import torch
 from PIL import Image
@@ -16,117 +18,119 @@ CLASS_NAMES = [
     "scottish_terrier", "shiba_inu", "staffordshire_bull_terrier",
     "wheaten_terrier", "yorkshire_terrier",
 ]
-CLASS_TO_IDX = {name: idx for idx, name in enumerate(CLASS_NAMES)}
+CLASS_TO_IDX = {cls: i for i, cls in enumerate(CLASS_NAMES)}
+
 
 class OxfordIIITPetDataset(Dataset):
-    def __init__(self, root: str, split: str = "trainval", transform=None, mask_transform=None, require_bbox=False):
-        self.root = root
-        self.split = split
-        self.transform = transform
+    def __init__(
+        self,
+        root: str,
+        split: str = "trainval",
+        transform=None,
+        mask_transform=None,
+        require_bbox: bool = False,
+    ):
+        self.root           = root
+        self.split          = split
+        self.transform      = transform
         self.mask_transform = mask_transform
-        self.require_bbox = require_bbox
+        self.require_bbox   = require_bbox
+
         self.image_dir = os.path.join(root, "images")
-        self.xml_dir = os.path.join(root, "annotations", "xmls")
-        self.mask_dir = os.path.join(root, "annotations", "trimaps")
+        self.xml_dir   = os.path.join(root, "annotations", "xmls")
+        self.mask_dir  = os.path.join(root, "annotations", "trimaps")
+
         self.samples = self._parse_split()
 
     def _parse_split(self):
         list_file = os.path.join(self.root, "annotations", "list.txt")
-        all_samples = []
-        with open(list_file) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
+        entries = []
+
+        with open(list_file) as fh:
+            for raw in fh:
+                row = raw.strip()
+                if not row or row.startswith("#"):
                     continue
-                parts = line.split()
-                name = parts[0]
-                class_id = int(parts[1]) - 1
-                img_path = os.path.join(self.image_dir, f"{name}.jpg")
-                mask_path = os.path.join(self.mask_dir, f"{name}.png")
-                xml_path = os.path.join(self.xml_dir, f"{name}.xml")
-                
-                if not os.path.exists(img_path) or not os.path.exists(mask_path):
+                cols     = row.split()
+                stem     = cols[0]
+                cls_id   = int(cols[1]) - 1
+                img_path  = os.path.join(self.image_dir, f"{stem}.jpg")
+                msk_path  = os.path.join(self.mask_dir,  f"{stem}.png")
+                xml_path  = os.path.join(self.xml_dir,   f"{stem}.xml")
+
+                if not os.path.exists(img_path) or not os.path.exists(msk_path):
                     continue
-                    
-                # Skip samples without bounding boxes if require_bbox is True
                 if self.require_bbox and not os.path.exists(xml_path):
                     continue
-                    
-                all_samples.append((name, class_id))
 
-        import random
+                entries.append((stem, cls_id))
+
+        # Deterministic shuffle then split
+        entries_sorted = sorted(entries)
         rng = random.Random(42)
-        all_samples_sorted = sorted(all_samples)
-        rng.shuffle(all_samples_sorted)
-        split_idx = int(0.85 * len(all_samples_sorted))
+        rng.shuffle(entries_sorted)
+        cutoff = int(0.85 * len(entries_sorted))
 
-        if self.split in ["trainval"]:
-            return all_samples_sorted[:split_idx]
-        else:
-            return all_samples_sorted[split_idx:]
+        return entries_sorted[:cutoff] if self.split == "trainval" else entries_sorted[cutoff:]
 
-    def _load_bbox(self, name):
-        xml_path = os.path.join(self.xml_dir, f"{name}.xml")
+    def _load_bbox(self, stem):
+        xml_path = os.path.join(self.xml_dir, f"{stem}.xml")
         if not os.path.exists(xml_path):
             return None
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
-        size = root.find("size")
-        w = int(size.find("width").text)
-        h = int(size.find("height").text)
-        obj = root.find("object")
-        box = obj.find("bndbox")
-        xmin = float(box.find("xmin").text)
-        ymin = float(box.find("ymin").text)
-        xmax = float(box.find("xmax").text)
-        ymax = float(box.find("ymax").text)
-        cx = (xmin + xmax) / 2.0
-        cy = (ymin + ymax) / 2.0
-        bw = xmax - xmin
-        bh = ymax - ymin
-        return [cx, cy, bw, bh], w, h
+        root_node = ET.parse(xml_path).getroot()
+        sz   = root_node.find("size")
+        orig_w = int(sz.find("width").text)
+        orig_h = int(sz.find("height").text)
+        bndbox = root_node.find("object").find("bndbox")
+        x0 = float(bndbox.find("xmin").text)
+        y0 = float(bndbox.find("ymin").text)
+        x1 = float(bndbox.find("xmax").text)
+        y1 = float(bndbox.find("ymax").text)
+        cx = (x0 + x1) / 2.0
+        cy = (y0 + y1) / 2.0
+        bw = x1 - x0
+        bh = y1 - y0
+        return [cx, cy, bw, bh], orig_w, orig_h
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        name, class_id = self.samples[idx]
-        img_path = os.path.join(self.image_dir, f"{name}.jpg")
-        image = np.array(Image.open(img_path).convert("RGB"))
-        mask_path = os.path.join(self.mask_dir, f"{name}.png")
-        mask = np.array(Image.open(mask_path))
-        mask = (mask - 1).clip(0, 2).astype(np.uint8)
+        stem, cls_id = self.samples[idx]
 
-        bbox_data = self._load_bbox(name)
-        if bbox_data is not None:
-            bbox, orig_w, orig_h = bbox_data
+        img = np.array(Image.open(os.path.join(self.image_dir, f"{stem}.jpg")).convert("RGB"))
+        msk = np.array(Image.open(os.path.join(self.mask_dir,  f"{stem}.png")))
+        msk = (msk - 1).clip(0, 2).astype(np.uint8)
+
+        bbox_info = self._load_bbox(stem)
+        if bbox_info is not None:
+            bbox, _ow, _oh = bbox_info
         else:
-            h, w = image.shape[:2]
+            h, w = img.shape[:2]
             bbox = [w / 2.0, h / 2.0, float(w), float(h)]
 
         if self.transform is not None:
-            h, w = image.shape[:2]
-            bx = max(0.0, bbox[0] - bbox[2] / 2)
-            by = max(0.0, bbox[1] - bbox[3] / 2)
-            bw = min(bbox[2], w - bx)
-            bh = min(bbox[3], h - by)
+            h, w    = img.shape[:2]
+            bx      = max(0.0, bbox[0] - bbox[2] / 2)
+            by      = max(0.0, bbox[1] - bbox[3] / 2)
+            bw_clip = min(bbox[2], w - bx)
+            bh_clip = min(bbox[3], h - by)
 
-            transformed = self.transform(
-                image=image, mask=mask,
-                bboxes=[[bx, by, bw, bh]], bbox_labels=[0],
+            out   = self.transform(
+                image=img, mask=msk,
+                bboxes=[[bx, by, bw_clip, bh_clip]],
+                bbox_labels=[0],
             )
-            image = transformed["image"]
-            mask = transformed["mask"]
-            boxes = transformed["bboxes"]
-            if len(boxes) > 0:
-                bx2, by2, bw2, bh2 = boxes[0]
-                bbox = [bx2 + bw2 / 2, by2 + bh2 / 2, bw2, bh2]
+            img = out["image"]
+            msk = out["mask"]
+            remaining = out["bboxes"]
+            if remaining:
+                rx, ry, rw, rh = remaining[0]
+                bbox = [rx + rw / 2, ry + rh / 2, rw, rh]
             else:
                 bbox = [112.0, 112.0, 224.0, 224.0]
         else:
-            image = torch.from_numpy(image.transpose(2, 0, 1)).float() / 255.0
-            mask = torch.from_numpy(mask).long()
+            img = torch.from_numpy(img.transpose(2, 0, 1)).float() / 255.0
+            msk = torch.from_numpy(msk).long()
 
-        bbox_tensor = torch.tensor(bbox, dtype=torch.float32)
-        label_tensor = torch.tensor(class_id, dtype=torch.long)
-        return image, label_tensor, bbox_tensor, mask
+        return img, torch.tensor(cls_id, dtype=torch.long), torch.tensor(bbox, dtype=torch.float32), msk

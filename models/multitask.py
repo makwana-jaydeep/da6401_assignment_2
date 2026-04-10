@@ -8,42 +8,32 @@ from .layers import CustomDropout, SigmoidBBox
 from .classification import VGG11Classifier
 from .localization import VGG11Localizer
 from .segmentation import VGG11UNet
+import gdown
 
-
-def double_conv(in_c, out_c):
+def _double_conv(in_ch, out_ch):
     return nn.Sequential(
-        nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
-        nn.BatchNorm2d(out_c),
+        nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
+        nn.BatchNorm2d(out_ch),
         nn.ReLU(inplace=True),
-        nn.Conv2d(out_c, out_c, kernel_size=3, padding=1),
-        nn.BatchNorm2d(out_c),
+        nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
+        nn.BatchNorm2d(out_ch),
         nn.ReLU(inplace=True),
     )
 
 
 class MultiTaskPerceptionModel(nn.Module):
     """
-    Shared VGG11 backbone with three task heads:
-    classification, localization, and segmentation.
+    Unified model with a shared VGG-11 backbone and three task heads:
+      1. Classification  — 37-class breed prediction
+      2. Localization    — [cx, cy, w, h] bounding-box regression
+      3. Segmentation    — per-pixel trimap labelling via a U-Net decoder
 
-    A single forward() call returns all three outputs simultaneously, sharing
-    the full encoder computation (backbone + skip features).
+    Two backbone instances are kept so the classifier/localizer backbone and
+    the segmentation backbone can hold weights from their respective checkpoints
+    without interference.
 
-    Weight loading
-    --------------
-    Weights are transferred from the three individually trained checkpoints.
-    The backbone is initialised from the classifier checkpoint (best source of
-    discriminative features). The loc_head and seg decoder come from their
-    respective checkpoints.
-
-    Architecture notes
-    ------------------
-    * loc_head ends with SigmoidBBox (NOT ReLU). Both individual models had a
-      ReLU bug here; this unified model is corrected.
-    * The gdown download calls that existed in the original template have been
-      removed. Checkpoints are read directly from local paths that are passed
-      as constructor arguments, which is simpler and avoids network dependency
-      at instantiation time.
+    Pretrained weights are loaded from local checkpoint paths passed at
+    construction time; no external download calls are made.
     """
 
     def __init__(
@@ -58,16 +48,16 @@ class MultiTaskPerceptionModel(nn.Module):
         unet_path: str = "checkpoints/unet.pth",
     ):
         super().__init__()
-        import gdown
+        
         gdown.download(id="1fPd3gsn7CB-LoX621QLUoj6j1YQQksL7", output=classifier_path, quiet=False)
         gdown.download(id="12iBT78Ptvb__K-h1jlPJc0MenLHU-XOJ", output=localizer_path, quiet=False)
         gdown.download(id="1mSZbQLzeLpHtoAcPpQs_Ka1RM486NiiH", output=unet_path, quiet=False)
 
-        # ── Shared backbone ───────────────────────────────────────────────
-        # self.backbone = VGG11Encoder(in_channels=in_channels)
-        self.backbone = VGG11Encoder(in_channels=in_channels)      # for cls + loc
-        self.seg_backbone = VGG11Encoder(in_channels=in_channels)  # for segmentation
-        # ── Classification head ───────────────────────────────────────────
+        # Two separate encoders: one for cls+loc, one for seg
+        self.backbone     = VGG11Encoder(in_channels=in_channels)
+        self.seg_backbone = VGG11Encoder(in_channels=in_channels)
+
+        # Classification head
         self.adaptive_pool = nn.AdaptiveAvgPool2d((7, 7))
         self.cls_head = nn.Sequential(
             nn.Linear(512 * 7 * 7, 4096),
@@ -79,11 +69,7 @@ class MultiTaskPerceptionModel(nn.Module):
             nn.Linear(4096, num_breeds),
         )
 
-        # ── Localisation head ─────────────────────────────────────────────
-        # FIXED: was nn.ReLU(inplace=True) as the last layer in both the
-        # standalone VGG11Localizer and the original version of this file.
-        # ReLU caused dying-neuron gradients and unbounded MSE loss.
-        # SigmoidBBox maps output to (0, image_size) — stable and correct.
+        # Localisation head — SigmoidBBox avoids the unbounded-output / dying-ReLU problem
         self.loc_head = nn.Sequential(
             nn.Linear(512 * 7 * 7, 4096),
             nn.ReLU(inplace=True),
@@ -92,92 +78,86 @@ class MultiTaskPerceptionModel(nn.Module):
             nn.ReLU(inplace=True),
             CustomDropout(p=dropout_p),
             nn.Linear(1024, 4),
-            SigmoidBBox(scale=image_size),   # was: nn.ReLU(inplace=True) ← BUG FIXED
+            SigmoidBBox(scale=image_size),
         )
 
-        # ── Segmentation decoder ──────────────────────────────────────────
-        self.bottleneck = double_conv(512, 1024)
+        # Segmentation decoder (U-Net style)
+        self.bottleneck = _double_conv(512, 1024)
 
         self.up5  = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
-        self.dec5 = double_conv(512 + 512, 512)
+        self.dec5 = _double_conv(512 + 512, 512)
 
         self.up4  = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
-        self.dec4 = double_conv(256 + 512, 256)
+        self.dec4 = _double_conv(256 + 512, 256)
 
         self.up3  = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.dec3 = double_conv(128 + 256, 128)
+        self.dec3 = _double_conv(128 + 256, 128)
 
         self.up2  = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.dec2 = double_conv(64 + 128, 64)
+        self.dec2 = _double_conv(64 + 128, 64)
 
         self.up1  = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
-        self.dec1 = double_conv(32 + 64, 32)
+        self.dec1 = _double_conv(32 + 64, 32)
 
         self.seg_dropout = CustomDropout(p=dropout_p)
         self.seg_head    = nn.Conv2d(32, seg_classes, kernel_size=1)
 
-        # ── Load pretrained weights ───────────────────────────────────────
         self._load_weights(classifier_path, localizer_path, unet_path)
 
-    # ── Weight transfer ────────────────────────────────────────────────────
-
     def _load_weights(self, classifier_path, localizer_path, unet_path):
-        device = torch.device("cpu")
+        cpu = torch.device("cpu")
 
         if os.path.exists(unet_path):
-            unet = VGG11UNet()
-            unet.load_state_dict(torch.load(unet_path, map_location=device))
-            self.seg_backbone.load_state_dict(unet.encoder.state_dict())  # seg_backbone from unet
-            self.bottleneck.load_state_dict(unet.bottleneck.state_dict())
-            self.up5.load_state_dict(unet.up5.state_dict())
-            self.dec5.load_state_dict(unet.dec5.state_dict())
-            self.up4.load_state_dict(unet.up4.state_dict())
-            self.dec4.load_state_dict(unet.dec4.state_dict())
-            self.up3.load_state_dict(unet.up3.state_dict())
-            self.dec3.load_state_dict(unet.dec3.state_dict())
-            self.up2.load_state_dict(unet.up2.state_dict())
-            self.dec2.load_state_dict(unet.dec2.state_dict())
-            self.up1.load_state_dict(unet.up1.state_dict())
-            self.dec1.load_state_dict(unet.dec1.state_dict())
-            self.seg_head.load_state_dict(unet.head.state_dict())
-            print(f"[MultiTask] Loaded U-Net weights (+ seg_backbone) from {unet_path}")
+            unet_ckpt = VGG11UNet()
+            unet_ckpt.load_state_dict(torch.load(unet_path, map_location=cpu))
+            self.seg_backbone.load_state_dict(unet_ckpt.encoder.state_dict())
+            self.bottleneck.load_state_dict(unet_ckpt.bottleneck.state_dict())
+            for level in [5, 4, 3, 2, 1]:
+                getattr(self, f"up{level}").load_state_dict(
+                    getattr(unet_ckpt, f"up{level}").state_dict()
+                )
+                getattr(self, f"dec{level}").load_state_dict(
+                    getattr(unet_ckpt, f"dec{level}").state_dict()
+                )
+            self.seg_head.load_state_dict(unet_ckpt.head.state_dict())
+            print(f"[MultiTask] U-Net weights loaded from {unet_path}")
         else:
-            print(f"[MultiTask] WARNING: U-Net checkpoint not found at {unet_path}.")
+            print(f"[MultiTask] WARNING: no U-Net checkpoint at {unet_path}")
 
         if os.path.exists(classifier_path):
-            clf = VGG11Classifier()
-            clf.load_state_dict(torch.load(classifier_path, map_location=device))
-            self.backbone.load_state_dict(clf.encoder.state_dict())  # cls backbone from classifier
-            self.cls_head.load_state_dict(clf.classifier.state_dict())
-            print(f"[MultiTask] Loaded classifier weights from {classifier_path}")
+            clf_ckpt = VGG11Classifier()
+            clf_ckpt.load_state_dict(torch.load(classifier_path, map_location=cpu))
+            self.backbone.load_state_dict(clf_ckpt.encoder.state_dict())
+            self.cls_head.load_state_dict(clf_ckpt.classifier.state_dict())
+            print(f"[MultiTask] Classifier weights loaded from {classifier_path}")
         else:
-            print(f"[MultiTask] WARNING: classifier checkpoint not found at {classifier_path}.")
+            print(f"[MultiTask] WARNING: no classifier checkpoint at {classifier_path}")
 
         if os.path.exists(localizer_path):
-            loc = VGG11Localizer()
-            loc.load_state_dict(torch.load(localizer_path, map_location=device))
-            self.loc_head.load_state_dict(loc.regressor.state_dict())
-            print(f"[MultiTask] Loaded localizer weights from {localizer_path}")
+            loc_ckpt = VGG11Localizer()
+            loc_ckpt.load_state_dict(torch.load(localizer_path, map_location=cpu))
+            self.loc_head.load_state_dict(loc_ckpt.regressor.state_dict())
+            print(f"[MultiTask] Localizer weights loaded from {localizer_path}")
         else:
-            print(f"[MultiTask] WARNING: localizer checkpoint not found at {localizer_path}.")
+            print(f"[MultiTask] WARNING: no localizer checkpoint at {localizer_path}")
 
     def forward(self, x: torch.Tensor) -> dict:
-        # cls + loc — use classifier backbone
-        bottleneck, _ = self.backbone(x, return_features=True)
-        pooled = self.adaptive_pool(bottleneck)
-        flat = torch.flatten(pooled, 1)
-        cls_out = self.cls_head(flat)
-        loc_out = self.loc_head(flat)
+        # Classification + localisation share the cls/loc backbone
+        neck, _     = self.backbone(x, return_features=True)
+        pooled      = self.adaptive_pool(neck)
+        flat        = torch.flatten(pooled, start_dim=1)
+        cls_out     = self.cls_head(flat)
+        loc_out     = self.loc_head(flat)
 
-        # seg — use unet backbone
-        seg_bottleneck, features = self.seg_backbone(x, return_features=True)
-        s = self.bottleneck(seg_bottleneck)
-        s = self.up5(s);  s = torch.cat([s, features["f5"]], dim=1); s = self.dec5(s)
-        s = self.up4(s);  s = torch.cat([s, features["f4"]], dim=1); s = self.dec4(s)
-        s = self.up3(s);  s = torch.cat([s, features["f3"]], dim=1); s = self.dec3(s)
-        s = self.up2(s);  s = torch.cat([s, features["f2"]], dim=1); s = self.dec2(s)
-        s = self.up1(s);  s = torch.cat([s, features["f1"]], dim=1); s = self.dec1(s)
-        s = self.seg_dropout(s)
-        seg_out = self.seg_head(s)
+        # Segmentation uses its own backbone to preserve U-Net features
+        seg_neck, skips = self.seg_backbone(x, return_features=True)
+        d = self.bottleneck(seg_neck)
+        d = self.up5(d);  d = torch.cat([d, skips["f5"]], dim=1);  d = self.dec5(d)
+        d = self.up4(d);  d = torch.cat([d, skips["f4"]], dim=1);  d = self.dec4(d)
+        d = self.up3(d);  d = torch.cat([d, skips["f3"]], dim=1);  d = self.dec3(d)
+        d = self.up2(d);  d = torch.cat([d, skips["f2"]], dim=1);  d = self.dec2(d)
+        d = self.up1(d);  d = torch.cat([d, skips["f1"]], dim=1);  d = self.dec1(d)
+        d = self.seg_dropout(d)
+        seg_out = self.seg_head(d)
 
         return {"classification": cls_out, "localization": loc_out, "segmentation": seg_out}

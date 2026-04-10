@@ -1,48 +1,53 @@
 import torch
 import torch.nn as nn
 
+
 class IoULoss(nn.Module):
+    """
+    1 - IoU loss for axis-aligned bounding boxes in [cx, cy, w, h] format.
+    Boxes are converted to corner format internally before computing overlap.
+    """
+
     def __init__(self, eps: float = 1e-6, reduction: str = "mean"):
         super().__init__()
-        if reduction not in {"mean", "sum", "none"}:
-            raise ValueError(f"Invalid reduction '{reduction}'.")
+        allowed = {"mean", "sum", "none"}
+        if reduction not in allowed:
+            raise ValueError(f"reduction must be one of {allowed}, got '{reduction}'")
         self.eps = eps
         self.reduction = reduction
 
     def forward(self, pred_boxes: torch.Tensor, target_boxes: torch.Tensor) -> torch.Tensor:
-        # Convert [cx, cy, w, h] to [x1, y1, x2, y2]
-        pred_x1 = pred_boxes[:, 0] - pred_boxes[:, 2] / 2
-        pred_y1 = pred_boxes[:, 1] - pred_boxes[:, 3] / 2
-        pred_x2 = pred_boxes[:, 0] + pred_boxes[:, 2] / 2
-        pred_y2 = pred_boxes[:, 1] + pred_boxes[:, 3] / 2
+        # Unpack centre-format into corner coordinates
+        px1 = pred_boxes[:, 0] - pred_boxes[:, 2] / 2
+        py1 = pred_boxes[:, 1] - pred_boxes[:, 3] / 2
+        px2 = pred_boxes[:, 0] + pred_boxes[:, 2] / 2
+        py2 = pred_boxes[:, 1] + pred_boxes[:, 3] / 2
 
-        tgt_x1 = target_boxes[:, 0] - target_boxes[:, 2] / 2
-        tgt_y1 = target_boxes[:, 1] - target_boxes[:, 3] / 2
-        tgt_x2 = target_boxes[:, 0] + target_boxes[:, 2] / 2
-        tgt_y2 = target_boxes[:, 1] + target_boxes[:, 3] / 2
+        gx1 = target_boxes[:, 0] - target_boxes[:, 2] / 2
+        gy1 = target_boxes[:, 1] - target_boxes[:, 3] / 2
+        gx2 = target_boxes[:, 0] + target_boxes[:, 2] / 2
+        gy2 = target_boxes[:, 1] + target_boxes[:, 3] / 2
 
-        # Intersection
-        inter_x1 = torch.max(pred_x1, tgt_x1)
-        inter_y1 = torch.max(pred_y1, tgt_y1)
-        inter_x2 = torch.min(pred_x2, tgt_x2)
-        inter_y2 = torch.min(pred_y2, tgt_y2)
+        # Overlap rectangle
+        ix1 = torch.max(px1, gx1)
+        iy1 = torch.max(py1, gy1)
+        ix2 = torch.min(px2, gx2)
+        iy2 = torch.min(py2, gy2)
 
-        # .clamp(min=0) is crucial here for Degenerate Box Handling (w, h ~ 0)
-        inter_w = (inter_x2 - inter_x1).clamp(min=0)
-        inter_h = (inter_y2 - inter_y1).clamp(min=0)
-        inter_area = inter_w * inter_h
+        # Clamp prevents negative area for non-overlapping boxes
+        overlap_w = (ix2 - ix1).clamp(min=0)
+        overlap_h = (iy2 - iy1).clamp(min=0)
+        intersection = overlap_w * overlap_h
 
-        # Areas
-        pred_area = (pred_x2 - pred_x1).clamp(min=0) * (pred_y2 - pred_y1).clamp(min=0)
-        tgt_area = (tgt_x2 - tgt_x1).clamp(min=0) * (tgt_y2 - tgt_y1).clamp(min=0)
+        area_pred   = (px2 - px1).clamp(min=0) * (py2 - py1).clamp(min=0)
+        area_target = (gx2 - gx1).clamp(min=0) * (gy2 - gy1).clamp(min=0)
+        union       = area_pred + area_target - intersection + self.eps
 
-        # Union and IoU
-        union_area = pred_area + tgt_area - inter_area + self.eps
-        iou = inter_area / union_area
+        iou  = intersection / union
         loss = 1.0 - iou
 
         if self.reduction == "mean":
             return loss.mean()
-        elif self.reduction == "sum":
+        if self.reduction == "sum":
             return loss.sum()
         return loss
